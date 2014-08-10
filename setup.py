@@ -60,6 +60,7 @@ setup(name='mypy',
       py_modules=['typing'],
       packages=['mypy'],
       scripts=['scripts/mypy'],
+      install_requires=['click>=2.0,<3.0'],
       data_files=stubs,
       classifiers=classifiers,
       )

@@ -10,39 +10,88 @@ limited feature set.
 
 import os
 import os.path
-import shutil
 import subprocess
 import sys
-import tempfile
+
+import click
 
 import typing
-from typing import List, Tuple
+from typing import List
 
 from mypy import build
 from mypy.errors import CompileError
 
 
-class Options:
-    def __init__(self) -> None:
-        # Set default options.
-        self.target = build.TYPE_CHECK
-        self.build_flags = List[str]()
-        self.interpreter = 'python'
-        self.pyversion = 3
-        self.custom_typing_module = None # type: str
-        self.html_report_dir = None # type: str
+@click.command()
+@click.option('-m', '--module', is_flag=True,
+              help="check and run module as a script.")
+@click.option('-S', '--only-check', is_flag=True,
+              help="only check; do not run program or module")
+@click.option('--verbose', is_flag=True, help="more verbose message")
+@click.option('--html-report', metavar='dir', type=click.Path(exists=True),
+              help="type check and generate a report of type checking precision under dir/, "
+              "do not run the program")
+@click.option('-c', is_flag=True)
+@click.option('--stats', is_flag=True)
+@click.option('--inferstats', is_flag=True)
+@click.option('--custom-typing')
+@click.option('--py2', metavar="INTERPRETER")
+@click.option('--mypypath', envvar='MYPYPATH',
+              help='additional module search path (ENVVAR: MYPYPATH)',
+              type=click.Path(exists=True))
+@click.argument('PATH', type=click.Path(exists=True))
+def main(path, module, only_check, verbose, html_report, c, stats, inferstats, custom_typing, py2, mypypath) -> None:
+    build_flags = List[str]()
+    if verbose:
+        build_flags.append(build.VERBOSE)
+    if only_check:
+        build_flags.append(build.COMPILE_ONLY)
+    if stats:
+        build_flags.append('dump-type-stats')
+    if inferstats:
+        build_flags.append('dump-infer-stats')
+    if html_report:
+        build_flags.append('html-report')
 
-
-def main() -> None:
+    if py2:
+        interpreter = py2
+    elif sys.executable:
+        interpreter = sys.executable
+    else:
+        interpreter = 'python'
+    pyversion = 2 if py2 else 3
+    target = build.C if c else build.TYPE_CHECK
     bin_dir = find_bin_directory()
-    path, module, args, options = process_options(sys.argv[1:])
+
+    # TODO: mutually exclude path and module in CLI
+    if module:
+        path = None
+
     try:
-        if options.target == build.TYPE_CHECK:
-            type_check_only(path, module, bin_dir, args, options)
-        elif options.target == build.C:
-            compile_to_c(path, module, bin_dir, args, options)
-        else:
-            raise RuntimeError('unsupported target %d' % options.target)
+        # TODO: Move assertions into click parser assertions
+        if c == build.C:
+            assert not module # Not supported yet
+            assert pyversion == 3
+
+        print(target)
+        result = build.build(path,
+                             module=module,
+                             bin_dir=bin_dir,
+                             target=target,
+                             pyversion=pyversion,
+                             custom_typing_module=custom_typing,
+                             html_report_dir=html_report,
+                             flags=build_flags)
+
+        if build.COMPILE_ONLY not in build_flags:
+            if c == build.TYPE_CHECK:
+                # TODO: Implement arg pass-through
+                status = interpret(pyversion, interpreter, path, module, [])
+            elif c == build.C:
+                status = run_compiled(result)
+            else:
+                raise RuntimeError('unsupported target %d' % target)
+            sys.exit(status)
     except CompileError as e:
         for m in e.messages:
             sys.stderr.write(m + '\n')
@@ -56,7 +105,7 @@ def find_bin_directory() -> str:
     """
     script = __file__
     # Follow up to 5 symbolic links (cap to avoid cycles).
-    for i in range(5):
+    for _ in range(5):
         if os.path.islink(script):
             script = readlinkabs(script)
         else:
@@ -74,126 +123,26 @@ def readlinkabs(link: str) -> str:
     return os.path.join(os.path.dirname(link), path)
 
 
-def type_check_only(path: str, module: str, bin_dir: str, args: List[str],
-                    options: Options) -> None:
-    # Type check the program and dependencies and translate to Python.
-    build.build(path,
-                module=module,
-                bin_dir=bin_dir,
-                target=build.TYPE_CHECK,
-                pyversion=options.pyversion,
-                custom_typing_module=options.custom_typing_module,
-                html_report_dir=options.html_report_dir,
-                flags=options.build_flags)
-
-    if build.COMPILE_ONLY not in options.build_flags:
-        # Run the translated program.
-        if module:
-            opts = ['-m', module]
-        else:
-            opts = [path]
-        if (options.pyversion == 2 and
-                os.path.dirname(typing.__file__).endswith(
-                    os.path.join('lib-typing', '3.2')) and
-                os.path.isdir('lib-typing')):            
-            # We are running Python 2.x test cases and we must force the 2.x
-            # typing module to be used.
-            os.environ['PYTHONPATH'] = os.path.join('lib-typing', '2.7')
-        status = subprocess.call([options.interpreter] + opts + args)
-        sys.exit(status)
+def interpret(pyversion, interpreter, path, module, args) -> None:
+    # Run the translated program.
+    if module:
+        opts = ['-m', module]
+    else:
+        opts = [path]
+    if (pyversion == 2 and
+            os.path.dirname(typing.__file__).endswith(
+                os.path.join('lib-typing', '3.2')) and
+            os.path.isdir('lib-typing')):
+        # We are running Python 2.x test cases and we must force the 2.x
+        # typing module to be used.
+        os.environ['PYTHONPATH'] = os.path.join('lib-typing', '2.7')
+    return subprocess.call([interpreter] + opts + args)
 
 
-def compile_to_c(path: str, module: str, bin_dir: str, args: List[str],
-                 options: Options) -> None:
-    assert not module # Not supported yet
-    assert not args   # Not supported yet
-    assert options.pyversion == 3
-    
-    # Compile the program to C (also generate binary by default).
-    result = build.build(path, target=build.C, bin_dir=bin_dir,
-                         flags=options.build_flags)
-
-    if build.COMPILE_ONLY not in options.build_flags:
-        # Run the compiled program.
-        # TODO command line arguments
-        status = subprocess.call([result.binary_path])
-        sys.exit(status)
-
-
-def process_options(args: List[str]) -> Tuple[str, str, List[str], Options]:
-    """Process command line arguments.
-
-    Return (mypy program path (or None),
-            module to run as script (or None),
-            remaining arguments, passed to mypy program
-            parsed flags)
-    """
-    options = Options()
-    if sys.executable:
-        options.interpreter = sys.executable
-    while args and args[0].startswith('-'):
-        if args[0] == '--verbose':
-            options.build_flags.append(build.VERBOSE)
-            args = args[1:]
-        elif args[0] == '--py2' and args[1:]:
-            # Generate Python 2 (but this is very incomplete).
-            options.pyversion = 2
-            options.interpreter = args[1]
-            args = args[2:]
-        elif args[0] == '-c':
-            options.target = build.C
-            args = args[1:]
-        elif args[0] == '-S':
-            options.build_flags.append(build.COMPILE_ONLY)
-            args = args[1:]
-        elif args[0] == '-m' and args[1:]:
-            options.build_flags.append(build.MODULE)
-            return None, args[1], args[2:], options
-        elif args[0] == '--stats':
-            options.build_flags.append('dump-type-stats')
-            args = args[1:]
-        elif args[0] == '--inferstats':
-            options.build_flags.append('dump-infer-stats')
-            args = args[1:]
-        elif args[0] == '--custom-typing' and args[1:]:
-            options.custom_typing_module = args[1]
-            args = args[2:]
-        elif args[0] == '--html-report' and args[1:]:
-            options.html_report_dir = args[1]
-            options.build_flags.append('html-report')
-            args = args[2:]
-        else:
-            usage('Invalid option {}'.format(args[0]))
-    
-    if not args:
-        usage()
-    
-    return args[0], None, args[1:], options
-
-
-def usage(msg: str = None) -> None:
-    if msg:
-        sys.stderr.write('%s\n' % msg)
-    sys.stderr.write(
-'''Usage: mypy [options] [-m mod | file] [args]
-
-Options:
-  -m mod      check and run module as a script (terminates option list)
-  -S          only check; do not run program or module
-  --verbose   more verbose messages
-  --html-report dir
-              type check and generate a report of type checking precision
-              under dir/, do not run the program
-
-Environment variables:
-  MYPYPATH    additional module search path
-''')
-    sys.exit(2)
-
-
-def fail(msg: str) -> None:
-    sys.stderr.write('%s\n' % msg)
-    sys.exit(1)
+def run_compiled(result) -> None:
+    # Run the compiled program.
+    # TODO command line arguments
+    return subprocess.call([result.binary_path])
 
 
 if __name__ == '__main__':
