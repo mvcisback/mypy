@@ -12,6 +12,7 @@ import os
 import os.path
 import subprocess
 import sys
+import shlex
 
 import click
 
@@ -22,25 +23,39 @@ from mypy import build
 from mypy.errors import CompileError
 
 
+def parse_target(ctx, _2, val):
+    if val == 'c':
+        if ctx.params['module'] or ctx.params['py2']:
+            raise click.BadParameter(
+                'Cannot enable module or py2 with c build target.')
+        return build.C
+    return build.TYPE_CHECK
+
+
 @click.command()
 @click.option('-m', '--module', is_flag=True,
-              help="check and run module as a script.")
+              help="run library module as a script (terminates option list)")
 @click.option('-S', '--only-check', is_flag=True,
               help="only check; do not run program or module")
 @click.option('--verbose', is_flag=True, help="more verbose message")
 @click.option('--html-report', metavar='dir', type=click.Path(exists=True),
               help="type check and generate a report of type checking precision under dir/, "
               "do not run the program")
-@click.option('-c', is_flag=True)
+@click.option('--py2', is_flag=True)
+@click.option('--target', default='c', type=click.Choice(['c', 'type_check']),
+              callback=parse_target)
 @click.option('--stats', is_flag=True)
 @click.option('--inferstats', is_flag=True)
+@click.option('--interpreter')
 @click.option('--custom-typing')
-@click.option('--py2', metavar="INTERPRETER")
 @click.option('--mypypath', envvar='MYPYPATH',
               help='additional module search path (ENVVAR: MYPYPATH)',
               type=click.Path(exists=True))
+@click.option('--pass-through-args', default="", callback=lambda ctx, param, val: shlex.split(val))
 @click.argument('PATH', type=click.Path(exists=True))
-def main(path, module, only_check, verbose, html_report, c, stats, inferstats, custom_typing, py2, mypypath) -> None:
+def main(path:str, module:str, only_check:bool, verbose:bool, html_report:str,
+         target:int, stats:bool, inferstats:bool, custom_typing:str, py2:bool,
+         mypypath:str, pass_through_args:List[str], interpreter) -> None:
     build_flags = List[str]()
     if verbose:
         build_flags.append(build.VERBOSE)
@@ -60,7 +75,6 @@ def main(path, module, only_check, verbose, html_report, c, stats, inferstats, c
     else:
         interpreter = 'python'
     pyversion = 2 if py2 else 3
-    target = build.C if c else build.TYPE_CHECK
     bin_dir = find_bin_directory()
 
     # TODO: mutually exclude path and module in CLI
@@ -68,12 +82,6 @@ def main(path, module, only_check, verbose, html_report, c, stats, inferstats, c
         path = None
 
     try:
-        # TODO: Move assertions into click parser assertions
-        if c == build.C:
-            assert not module # Not supported yet
-            assert pyversion == 3
-
-        print(target)
         result = build.build(path,
                              module=module,
                              bin_dir=bin_dir,
@@ -85,8 +93,8 @@ def main(path, module, only_check, verbose, html_report, c, stats, inferstats, c
 
         if build.COMPILE_ONLY not in build_flags:
             if c == build.TYPE_CHECK:
-                # TODO: Implement arg pass-through
-                status = interpret(pyversion, interpreter, path, module, [])
+                # TODO: Implement arg pass-through                
+                status = interpret(pyversion, interpreter, path, module, pass_through_args)
             elif c == build.C:
                 status = run_compiled(result)
             else:
