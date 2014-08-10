@@ -9,7 +9,6 @@ limited feature set.
 """
 
 import os
-import os.path
 import subprocess
 import sys
 import shlex
@@ -23,7 +22,8 @@ from mypy import build
 from mypy.errors import CompileError
 
 
-def parse_target(ctx, _2, val):
+def parse_target(ctx:click.Context, _:str, val:str):
+    """Parses and validates the use of the target flag."""
     if val == 'c':
         if ctx.params['module'] or ctx.params['py2']:
             raise click.BadParameter(
@@ -32,8 +32,16 @@ def parse_target(ctx, _2, val):
     return build.TYPE_CHECK
 
 
+def parse_interpreter(ctx:click.Context, _:str, interpreter:str):
+    if ctx.params['py2']:
+        interpreter = py2
+    elif sys.executable:
+        interpreter = sys.executable
+    return interpreter
+
+
 @click.command()
-@click.option('-m', '--module', is_flag=True,
+@click.option('-m', '--module',
               help="run library module as a script (terminates option list)")
 @click.option('-S', '--only-check', is_flag=True,
               help="only check; do not run program or module")
@@ -42,11 +50,11 @@ def parse_target(ctx, _2, val):
               help="type check and generate a report of type checking precision under dir/, "
               "do not run the program")
 @click.option('--py2', is_flag=True)
-@click.option('--target', default='c', type=click.Choice(['c', 'type_check']),
+@click.option('--target', default='type_check', type=click.Choice(['c', 'type_check']),
               callback=parse_target)
 @click.option('--stats', is_flag=True)
 @click.option('--inferstats', is_flag=True)
-@click.option('--interpreter')
+@click.option('--interpreter', callback=parse_interpreter, default='python')
 @click.option('--custom-typing')
 @click.option('--mypypath', envvar='MYPYPATH',
               help='additional module search path (ENVVAR: MYPYPATH)',
@@ -55,7 +63,7 @@ def parse_target(ctx, _2, val):
 @click.argument('PATH', type=click.Path(exists=True))
 def main(path:str, module:str, only_check:bool, verbose:bool, html_report:str,
          target:int, stats:bool, inferstats:bool, custom_typing:str, py2:bool,
-         mypypath:str, pass_through_args:List[str], interpreter) -> None:
+         mypypath:str, pass_through_args:List[str], interpreter:str) -> None:
     build_flags = List[str]()
     if verbose:
         build_flags.append(build.VERBOSE)
@@ -68,18 +76,11 @@ def main(path:str, module:str, only_check:bool, verbose:bool, html_report:str,
     if html_report:
         build_flags.append('html-report')
 
-    if py2:
-        interpreter = py2
-    elif sys.executable:
-        interpreter = sys.executable
-    else:
-        interpreter = 'python'
     pyversion = 2 if py2 else 3
     bin_dir = find_bin_directory()
 
-    # TODO: mutually exclude path and module in CLI
     if module:
-        path = None
+        module, path = path, None  # Hack because of the way build exepects it
 
     try:
         result = build.build(path,
@@ -92,13 +93,10 @@ def main(path:str, module:str, only_check:bool, verbose:bool, html_report:str,
                              flags=build_flags)
 
         if build.COMPILE_ONLY not in build_flags:
-            if c == build.TYPE_CHECK:
-                # TODO: Implement arg pass-through                
+            if target == build.TYPE_CHECK:
                 status = interpret(pyversion, interpreter, path, module, pass_through_args)
-            elif c == build.C:
+            elif target == build.C:
                 status = run_compiled(result)
-            else:
-                raise RuntimeError('unsupported target %d' % target)
             sys.exit(status)
     except CompileError as e:
         for m in e.messages:
@@ -131,10 +129,10 @@ def readlinkabs(link: str) -> str:
     return os.path.join(os.path.dirname(link), path)
 
 
-def interpret(pyversion, interpreter, path, module, args) -> None:
+def interpret(pyversion:int, interpreter:str, path:str, module:bool, args:List[str]) -> None:
     # Run the translated program.
     if module:
-        opts = ['-m', module]
+        opts = ['-m', path]
     else:
         opts = [path]
     if (pyversion == 2 and
